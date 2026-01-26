@@ -1,10 +1,9 @@
+from time import sleep
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pythonosc import udp_client
 from pythonosc import dispatcher
 from pythonosc import osc_server
 import threading
-import random
-import time
 
 client = udp_client.SimpleUDPClient("127.0.0.1", 11000)
 
@@ -20,77 +19,99 @@ server_thread.daemon = True
 server_thread.start()
 analyzer = SentimentIntensityAnalyzer()
 
-def fade_track(track, target_vol, duration, steps=30):
-    """Gradually fade a track's volume"""
-    # Get approximate current volume (we'll estimate based on our last setting)
-    for i in range(steps):
-        vol = target_vol * (i + 1) / steps
-        client.send_message("/live/track/set/volume", [track, vol])
-        time.sleep(duration / steps)
+class midilane:
+    def __init__(self, index, name, volume, duration):
+        self.index = index
+        self.name = name
+        self.volume = volume
+        self.duration = duration
+        self.active = False
+
+    def __repr__(self):
+        return f"midilane({self.name}, vol={self.volume}, dur={self.duration})"
+
+    def fade(self, target_vol, duration, steps=15):
+        self.active = target_vol > 0
+        print(f"  [{self.name}] fade to {target_vol} over {duration}s")
+
+        def do_fade():
+            start_vol = self.volume
+            for i in range(steps):
+                vol = start_vol + (target_vol - start_vol) * (i + 1) / steps
+                client.send_message("/live/track/set/volume", [self.index, vol])
+                sleep(duration / steps)
+            self.volume = target_vol
+
+        threading.Thread(target=do_fade, daemon=True).start()
 
 def main():
-    print("Type text to control Drift vinyl distortion based on sentiment")
-    print("Commands: 'list' to show parameters, 'devices' to show devices")
-    print("Press Ctrl+C to quit\n")
+    print("(Sentinent sounds)")
 
-    # Settings: track 1 = index 0, Drift device index, vinyl distortion param
-    track = 0
-    device = 2  # Change this if Drift is not the first device
-    param = 0   # We'll find the right index with 'list'
+    numberOfTracks = 9
+    tracks = []
+    for i in range(numberOfTracks):
+        tracks.append(midilane(i, f"track{i}", 0.0, 0.0))
 
-    value = 0.0
+    middle = len(tracks) // 2       
+    neutral = tracks[middle]
+
+    print("  [neutral lane: {}]".format(neutral.name))
+    print(format(tracks))
+
+    current = middle
+    tracks[middle].fade(0.85, 0.0)
+    track_timers = {}
+
+    def fade_out_track(track_index):
+        nonlocal current
+        if track_index != middle:
+            if track_index == current:
+                tracks[track_index].fade(0.0, 2.0)
+                print(f"  [timeout: track{track_index}]")
+                if current > middle:
+                    current -= 1
+                elif current < middle:
+                    current += 1
+                print(f"  [current reset to: {current}]")
+
+                if current != middle and current in track_timers:
+                    if not track_timers[current].is_alive():
+                        fade_out_track(current)
 
     while True:
         try:
-            text = input("> ").strip()
+            text = input("You: ").strip()
             if not text:
                 continue
 
-            if text == "devices":
-                client.send_message("/live/track/get/devices", [track])
-                print(f"  Requesting devices on track {track}...")
-                import time
-                time.sleep(0.5)
-                continue
-
-            if text == "list":
-                client.send_message("/live/device/get/parameters/name", [track, device])
-                print(f"  Requesting parameter names for track {track}, device {device}...")
-                import time
-                time.sleep(0.5)
-                continue
-
             scores = analyzer.polarity_scores(text)
-
-            # Use positive score (0 to 1) for parameter value
             pos = scores['pos']
             compound = scores['compound']
 
-            print(f"  pos: {pos:.2f}, neg: {scores['neg']:.2f}, neu: {scores['neu']:.2f}, compound: {compound:.2f}")
+            print(f"  [sentiment: pos={pos:.2f}, neg={scores['neg']:.2f}, compound={compound:.2f}]")
 
-            # Adjust value based on compound sentiment
+            previous = current
             if compound > 0.05:
-                value += 1
+                current = max(current - 1, 0)
             elif compound < -0.05:
-                value -= 1
-            else:
-                # Compound between -0.5 and 0.5: move value toward 0
-                if value > 0:
-                    value -= 1
-                elif value < 0:
-                    value += 1
+                current = min(current + 1, numberOfTracks - 1)
 
-            print(f"  -> Compound: {compound:.2f}, Value: {value}")
-            #client.send_message("/live/device/set/parameter/value", [track, device, param, value])
-            #print(f"  Setting track {track}, device {device}, param {param} to {value}")
-            if value == 1:
-                print("Setting volume to 1")
-                fade_track(1, 1.0, 4.0)
-            elif value == 2:
-                fade_track(2, 1.0, 4.0)
-            elif value == 0:
-                print("Setting volume to 0")
-                fade_track(1, 0.0, 2.0)
+            print(f"  [current: {current}]")
+
+            if current != previous and abs(current - middle) > abs(previous - middle):
+                tracks[current].fade(0.85, 2.0)
+
+            if current != middle:
+                if current in track_timers and track_timers[current].is_alive():
+                    track_timers[current].cancel()
+
+                stay_duration = len(text) * 1
+                print(f"  [track{current} stay: {stay_duration}s]")
+                timer = threading.Timer(stay_duration, fade_out_track, args=[current])
+                timer.daemon = True
+                timer.start()
+                track_timers[current] = timer
+
         except KeyboardInterrupt:
             print("\nExiting...")
             break

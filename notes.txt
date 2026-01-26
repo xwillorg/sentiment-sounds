@@ -3,5 +3,6 @@ resources:
 
 todo
 - character count decides fade length and max volume
-- get new ableton 12.3
 - interface design
+
+- get new ableton 12.3
